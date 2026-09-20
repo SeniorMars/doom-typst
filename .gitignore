@@ -1,0 +1,4 @@
+build/
+__pycache__/
+assets/doom1.wad
+vendor/doomgeneric/screenshots/

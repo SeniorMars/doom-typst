@@ -1,0 +1,65 @@
+#import "../engine/doom.typ": new-game, advance, info, framebuffer, play
+#{
+  let wad = read("../assets/doom1.wad", encoding: none)
+  let base = new-game(wad, tics: 1)
+  let original = info(base)
+  assert.eq((original.health, original.ammo, original.map, original.episode, original.state), (100, 50, 1, 1, 0))
+  let frame = framebuffer(base)
+  assert.eq(frame.len(), 320 * 200 * 3)
+  assert(frame != bytes(range(frame.len()).map(_ => 0)))
+  let moved = advance(base, "wwwwwwww")
+  assert.eq(info(moved).tic, original.tic + 8)
+  assert(info(moved).x != original.x or info(moved).y != original.y)
+  assert(framebuffer(moved) != frame)
+  assert.eq(info(base), original, message: "Transition must preserve the parent snapshot")
+  assert.eq(framebuffer(base), frame)
+  let branch = advance(base, "llllllll")
+  assert(info(branch).angle != original.angle)
+  assert.eq(info(base), original)
+  let actions = "wwwwjjjjffffxxxxwwww"
+  let once = advance(base, actions)
+  let split = advance(advance(base, actions.slice(0, 9)), actions.slice(9))
+  assert.eq(info(once), info(split))
+  assert.eq(framebuffer(once), framebuffer(split), message: "Rendering must not depend on transition chunk boundaries")
+  // The public replay path must match a single transition across cache blocks.
+  for length in (0, 15, 16, 17, 31, 32, 33, 65) {
+    let trace = ("wwjjffxx" * 9).slice(0, length)
+    let direct = advance(base, trace)
+    let replay = play(trace, wad: wad, tics: 1)
+    assert.eq(info(replay), info(direct))
+    assert.eq(framebuffer(replay), framebuffer(direct))
+  }
+  assert(info(once).ammo < original.ammo)
+  let trace = ("wwjjffxx" * 9).slice(0, 65)
+  let direct = advance(base, trace)
+  for chunk-size in (4, 8, 16, 32) {
+    let replay = play(trace, wad: wad, tics: 1, chunk-size: chunk-size)
+    assert.eq(info(replay), info(direct))
+    assert.eq(framebuffer(replay), framebuffer(direct))
+  }
+  let ignored = advance(base, " \n!?")
+  assert.eq(info(ignored), original)
+  assert.eq(framebuffer(ignored), frame)
+  let map = advance(base, "m")
+  assert(info(map).automap)
+  assert(not info(advance(map, "m")).automap)
+  let menu = advance(base, "p")
+  assert(info(menu).menu)
+  assert(framebuffer(menu) != frame)
+  let paused = advance(menu, "wwww")
+  assert.eq((info(paused).x, info(paused).y), (info(menu).x, info(menu).y))
+  assert(not info(advance(menu, "p")).menu)
+  let restarted = advance(menu, "cccxxxx")
+  assert(not info(restarted).menu)
+  assert.eq(info(restarted).map, 1)
+  assert.eq(info(restarted).health, 100)
+  assert.eq(info(play("wwr", wad: wad, tics: 1)), original)
+  let four = new-game(wad, tics: 4)
+  assert.eq(info(advance(four, "x")).tic, info(four).tic + 4)
+  for level in range(1, 10) {
+    let game = new-game(wad, map: level)
+    assert.eq(info(game).map, level)
+    assert.eq(framebuffer(game).len(), 320 * 200 * 3)
+  }
+  [Native DOOM engine checks passed.]
+}
