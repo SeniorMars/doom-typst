@@ -10,6 +10,7 @@ extern int __wrap_rename(const char *, const char *);
 extern int __wrap_remove(const char *);
 
 int main(void) {
+    assert(__wrap_rename("missing", "missing") == -1 && errno == ENOENT);
     unsigned char *data = malloc(MEMORY_FILE_CAPACITY);
     assert(data);
     for (size_t i = 0; i < MEMORY_FILE_CAPACITY; ++i) data[i] = i % 251;
@@ -36,7 +37,7 @@ int main(void) {
         assert(__wrap_fclose(f) == 0);
     }
     assert(memory_write("import", data, MEMORY_FILE_CAPACITY - 1) == 0);
-    assert(memory_write("import", data, MEMORY_FILE_CAPACITY) == -1);
+    assert(memory_write("import", data, MEMORY_FILE_CAPACITY) == -1 && errno == EFBIG);
     assert(__wrap_rename("import", "save0") == 0);
     size_t size;
     const unsigned char *saved = memory_read("save0", &size);

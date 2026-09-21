@@ -5,3 +5,5 @@
 #let game = core.doom.with(wad: read("assets/freedoom1.wad", encoding: none))
 #let doom = game
 #let play = core.play.with(wad: read("assets/freedoom1.wad", encoding: none))
+
+#let view = core.view.with(wad: read("assets/freedoom1.wad", encoding: none))

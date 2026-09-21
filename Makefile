@@ -14,7 +14,7 @@ TEST_JOBS ?= 4
 test:
 	$(MAKE) --no-print-directory -j$(TEST_JOBS) test-suite
 
-test-suite: test-imports test-memory-fs test-tools test-controls test-freedoom
+test-suite: test-imports test-memory-fs test-tools test-controls test-freedoom test-cached-view
 
 # Original DOOM fixtures are optional and never shipped with the package.
 ifneq ($(wildcard assets/doom1.wad),)
@@ -62,3 +62,27 @@ test-controls: | build
 
 test-freedoom: | build
 	$(TYPST) compile --root . tests/freedoom.typ build/freedoom-tests.pdf
+
+# Alternate cache budgets are tested without replacing the shipped engine.
+REPLAY_DELTA_BYTES ?= 4194304
+.PHONY: test-replay-cache
+test-replay-cache: | build
+	python3 scripts/build_engine.py --replay-delta-bytes $(REPLAY_DELTA_BYTES) --output build/doom-cache.wasm
+	$(TYPST) compile --root . tests/replay-cache.typ build/replay-cache.pdf
+	$(TYPST) compile --root . tests/replay-deltas.typ build/replay-deltas.pdf
+
+.PHONY: test-cached-view test-render-effects
+test-cached-view: | build
+	$(TYPST) compile --root . tests/cached-view.typ build/cached-view.pdf
+
+test-render-effects: | build
+	python3 scripts/build_engine.py --render-mode all --output build/doom-render-reference.wasm
+	$(TYPST) compile --root . --input reference=/build/doom-render-reference.wasm --input candidate=/engine/doom.wasm tests/render-effects.typ build/render-effects.pdf
+
+# Leave toolchains, benchmark reports, packages, and history backups intact.
+.PHONY: clean
+clean:
+	rm -f build/*.pdf build/*.png build/*.wasm build/*.log
+	rm -f build/test-memory-fs build/test-memory-fs-sanitized build/test-memory-fs-ubsan
+	rm -rf build/demo build/engine build/integration build/package-smoke
+	rm -rf build/test-memory-fs-sanitized.dSYM build/test-memory-fs-ubsan.dSYM

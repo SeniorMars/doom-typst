@@ -11,12 +11,21 @@
 #include "r_main.h"
 #include "r_draw.h"
 
+#ifdef DEFER_RASTER
+int doom_draw_pixels = 1;
+#endif
+
 extern byte *ylookup[];
 extern int columnofs[];
 
 void __wrap_R_DrawColumn(void) {
+#ifdef DEFER_RASTER
+    if (!doom_draw_pixels)
+        return;
+#endif
     int count = dc_yh - dc_yl;
-    if (count < 0) return;
+    if (count < 0)
+        return;
     byte *dest = ylookup[dc_yl] + columnofs[dc_x];
     const byte *source = dc_source;
     const byte *map = dc_colormap;
@@ -30,10 +39,14 @@ void __wrap_R_DrawColumn(void) {
 }
 
 void __wrap_R_DrawSpan(void) {
-    uint32_t position = (((uint32_t)ds_xfrac << 10) & 0xffff0000u)
-                      | (((uint32_t)ds_yfrac >> 6) & 0xffffu);
-    uint32_t step = (((uint32_t)ds_xstep << 10) & 0xffff0000u)
-                  | (((uint32_t)ds_ystep >> 6) & 0xffffu);
+#ifdef DEFER_RASTER
+    if (!doom_draw_pixels)
+        return;
+#endif
+    uint32_t position =
+        (((uint32_t)ds_xfrac << 10) & 0xffff0000u) | (((uint32_t)ds_yfrac >> 6) & 0xffffu);
+    uint32_t step =
+        (((uint32_t)ds_xstep << 10) & 0xffff0000u) | (((uint32_t)ds_ystep >> 6) & 0xffffu);
     byte *dest = ylookup[ds_y] + columnofs[ds_x1];
     const byte *source = ds_source;
     const byte *map = ds_colormap;

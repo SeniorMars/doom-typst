@@ -22,10 +22,17 @@ An `advance` call can take up to 4,096 command bytes.
 
 `play` handles a whole input history. It splits the commands into blocks of 16,
 which lets Typst reuse earlier blocks when you append input in live preview.
-A new compiler process still has to replay the history. Cached states can also
-be discarded when memory is needed.
+This API is useful for explicit state transitions and save export, but retaining
+many plugin snapshots can use substantial memory.
+
+`view(input, ...)` returns `(state: ..., frame: ...)` from a single cached call.
+It accepts the same game settings, bindings, and optional save as `play`, up to
+65,536 commands. It returns values rather than a game handle.
 
 `game` is the show rule used by the template, and `doom` is an alias for it.
+It uses `view` by default. Set `cache: false` to use the transition path for
+comparison. Save export uses that path automatically. A fresh compiler process
+still replays the history; the C cache speeds up later edits.
 The older `engine/doom.typ` import still defaults to a local `assets/doom1.wad`.
 The package entry point, `lib.typ`, defaults to Freedoom.
 
@@ -40,8 +47,10 @@ WAD lumps are read directly from the supplied bytes. This avoids making another
 copy of each resource in Doom's heap. The original BSP renderer is still used.
 It draws nearer geometry first and skips areas that are already hidden.
 
-Rendering runs on every tic because the fuzz effect and HUD keep state between
-frames. Only the frame requested by Typst is converted to RGB. Typst displays
+Render traversal runs on every tic because the fuzz effect and HUD keep state
+between frames. Wall and floor pixel writes are deferred until the last tic of
+each command; fuzz, sprites, HUD, and display bookkeeping still run. Only the
+frame requested by Typst is converted to RGB. Typst displays
 those bytes with its `rgb8` image format.
 
 `engine/native/draw.c` has versions of the column and span loops that keep texture
@@ -158,59 +167,104 @@ replacing `engine/doom.wasm`. The leading `/` means the Typst project root.
 ## Benchmarks
 
 ```sh
-python3 scripts/benchmark.py --output build/benchmark.json
+python3 scripts/benchmark.py --mode package --output build/benchmarks/run.json
+python3 scripts/benchmark.py --mode package --runner tinymist --commands 1000 --edits 1000 --edit-pattern session --output build/benchmarks/session.json
 ```
 
-The benchmark starts with 700 commands and appends eight more in `typst watch`.
-It records compile times, image and engine hashes, and peak memory use and CPU
-time on macOS/Linux. File notifications need to work for the edit tests to finish.
+The default workload starts with 700 commands and appends eight more. Reports
+include compile times, image hashes, CPU time, peak memory, and current compiler
+RSS when `ps` is available. Tinymist needs Node with built-in `WebSocket`; its
+latency ends at receipt of a preview packet, before browser painting.
 
-It uses Freedoom by default. Use `--wad assets/doom1.wad` for the original DOOM
-shareware workload. To try another engine or chunk size:
+Use `--commands`, `--edits`, `--engine`, and `--wad` to change the workload.
+The edit patterns are `append`, `tail`, `mixed`, `rewind`, and `session`. The
+session pattern includes firing, menus, deletion, middle edits, and restart.
+
+`--mode package` measures the normal show rule. For comparisons, `chunked` uses
+the transition API, `full` replays the history in one C call, and `c-cache`
+measures the frame-only cache. Full replay accepts at most 4,096 commands per
+call; cached play accepts 65,536. All modes work in a temporary directory.
+
+On September 20, 2026, with Freedoom, Typst 0.15.1, and four tics per command:
+
+| Workload | First frame | Median edit | Peak process RSS |
+| --- | ---: | ---: | ---: |
+| CLI, 1,000 commands and 32 appends | 2.45 s | 188 ms | 328 MiB |
+| CLI, 4,000 commands and eight appends | 9.64 s | 194 ms | 310 MiB |
+| Tinymist, 1,000 starting commands and 1,000 varied edits | 2.92 s | 41 ms | 300 MiB |
+
+All 42 CLI frames matched the previous renderer. Cold replay at 4,000 commands
+previously took 16.3 seconds. The integrated metadata/pixel path is slightly
+slower on warm CLI edits than the earlier frame-only prototype.
+
+Both 1,000-edit sessions completed. The CLI cache-integration run peaked at
+267 MiB current RSS and ended at 195 MiB. The final Tinymist build peaked at
+300 MiB and ended at 252 MiB. Neither showed sustained memory growth in this
+workload. Five CLI session frames, including branches and restart, also matched
+independent full replay. These are single-machine runs, not a memory bound for
+every WAD or a repeated latency study. Local reports are in `build/benchmarks/`.
+
+## Replay cache
+
+The C cache keeps the last input history, an initial snapshot, one recent full
+checkpoint, and up to 4 MiB of reverse deltas. Appending runs only new commands.
+Deleting or replacing input restores a retained checkpoint and replays from
+there. Older edits fall back to the initial snapshot. The immutable WAD is
+excluded from both full snapshots.
+
+Checkpoints use 16-command boundaries. Reverse deltas store the old bytes of
+changed 1 KiB blocks, with at most 64 entries. Old patches are dropped when the
+buffer fills. A patch too large for the budget discards the rewind chain; replay
+still works. If the heap grows, the cache retains its older complete checkpoint.
 
 ```sh
-python3 scripts/benchmark.py --engine build/candidate.wasm --chunk-size 8 --commands 2800 --edits 32 --output build/candidate.json
+make test-replay-cache
+make test-replay-cache REPLAY_DELTA_BYTES=64
+make test-replay-cache REPLAY_DELTA_BYTES=0
 ```
 
-The results below came from the shareware WAD on one machine with Typst 0.15.1.
-They measure CLI PNG output; editor and web-app timings may differ.
+These compare cached frames with normal replay, including deletion, branching,
+checkpoint boundaries, and multiple game configurations. The smaller budgets
+exercise fallback when a patch does not fit.
 
-With 700 commands, 32 edits, 16-command chunks, and the former 32 MiB initial
-memory setting:
+The cache depends on wasm-ld's C data and heap layout. The package uses a
+dedicated initializer and returns metadata and pixels together through
+`cached_view`. A save is loaded before taking the baseline; restart ignores it.
+Public transition-based handles stay separate. Do not mix low-level cached
+exports with advance, info, frame, or save/load on the same module.
 
-| Build | WASM size | First compile | Mean edit |
-| --- | ---: | ---: | ---: |
-| LLVM `-O2` | 447 KB | 2.37 s | 0.209 s |
-| Section GC | 447 KB | 2.30 s | 0.217 s |
-| Binaryen `-O3` | 399 KB | 2.21 s | 0.189 s |
-| LTO | 521 KB | 2.20 s | 0.196 s |
-| LTO + section GC + Binaryen | 462 KB | 2.25 s | 0.208 s |
+Typst can discard an instance, in which case the next call replays from the
+start. The cache is bounded per instance, not across the compiler. Save export
+uses larger replay blocks to avoid retaining a snapshot every 16 commands.
 
-The images matched across builds. Binaryen alone gave a smaller file and good
-edit times, so that's the default when it's installed.
+## Rendering checks
 
-After trimming closed save buffers and lowering initial memory, that build was
-399,801 bytes. It took 2.29 s for the first compile and 0.191 s per edit. All 33
-images matched the earlier build, as did the 237-point engine comparison.
+```sh
+make test-render-effects
+```
 
-Changing the chunk size with Binaryen gave:
+This compares the default deferred pixel writes with a build that draws every
+tic. It covers invulnerability, invisibility, menus, and the automap. The engine
+equivalence test also covers the nine shareware maps and the E1M1 exit trace.
 
-| Commands per chunk | First compile | Mean edit | Slowest edit |
-| ---: | ---: | ---: | ---: |
-| 4 | 2.59 s | 0.156 s | 0.168 s |
-| 8 | 2.42 s | 0.162 s | 0.174 s |
-| 16 | 2.29 s | 0.177 s | 0.209 s |
-| 32 | 2.26 s | 0.207 s | 0.266 s |
+For profiling, `--render-mode all` draws every tic. `--render-mode none` omits
+intermediate display work and requires a separate output path. It fails the
+powerup/automap comparison and must not be used for play.
 
-Smaller chunks made edits a little faster but used more memory. With 2,800
-commands, chunks of 4 or 8 used roughly 10–12 GiB, compared with 6.35 GiB for
-chunks of 16 under the old memory setting. Lowering initial memory brought that
-16-command run down to 4.38 GiB in a repeat test. Memory use varies with cache
-collection, and long histories can still get expensive. The default stays at 16.
+At 1,000 commands, full replay took about 4.0 seconds with every pixel drawn,
+2.4 seconds with deferred pixel writes, and 0.16 seconds with intermediate
+display work omitted. This is a coarse timing comparison, not a sampled profile.
+The initial frame tests missed the powerup regression; the effect tests caught it.
 
-Shorter engine warmups changed the initial frame, so the warmup stays at 17 tics.
-Larger 24/32 MiB Doom heaps used more memory without much improvement in startup
-time. Rendering still runs every tic to keep the fuzz effect and HUD consistent.
+## Cleaning up
+
+```sh
+make clean
+```
+
+Removes generated test files, trial engines, and temporary projects. Toolchains,
+benchmark reports, staged packages, downloaded archives, and history backups stay
+in `build/`. The runtime at `engine/doom.wasm` is kept too.
 
 ## Game options
 
@@ -223,7 +277,8 @@ time. Rendering still runs every tic to keep the fuzz effect and HUD consistent.
 | `tics` | `4` | Game tics per command, `1`–`35` |
 | `actions` | `(:)` | Change selected keybindings |
 | `help` | `true` | Show controls below the game |
-| `chunk-size` | `16` | Commands per cached transition |
+| `cache` | `true` | Use the bounded C cache for document play |
+| `chunk-size` | `16` | Commands per transition when `cache: false` |
 | `save` | `none` | Native DOOM save bytes to load before the commands |
 
 To use your own DOOM II IWAD, pass `wad: read("doom2.wad", encoding: none)`.

@@ -15,6 +15,12 @@ SRC = ROOT / 'vendor/doomgeneric/doomgeneric'
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--no-replay-cache', action='store_true',
+                        help='Omit the cached API for reference builds')
+    parser.add_argument('--replay-delta-bytes', type=int, default=4 * 1024 * 1024,
+                        help='Reverse-delta budget; 0 disables history deltas')
+    parser.add_argument('--render-mode', choices=('all', 'defer', 'none'), default='defer',
+                        help='Defer unseen pixel writes, draw every tic, or omit display work for profiling')
     parser.add_argument('--lto', action='store_true')
     parser.add_argument('--gc-sections', action='store_true')
     opt = parser.add_mutually_exclusive_group()
@@ -26,10 +32,14 @@ def main(argv=None):
                         help='Initial WASM bytes; 0 lets the linker choose its minimum')
     parser.add_argument('--output', type=Path, default=ROOT / 'engine/doom.wasm')
     args = parser.parse_args(argv)
+    if not 0 <= args.replay_delta_bytes <= 8 * 1024 * 1024:
+        parser.error('replay delta budget must be between 0 and 8 MiB')
     if args.initial_memory < 0 or args.initial_memory % 65536:
         parser.error('initial memory must be a nonnegative multiple of 65536')
     if args.jobs < 1:
         parser.error('jobs must be positive')
+    if (args.render_mode == 'none' or args.no_replay_cache) and args.output.resolve() == (ROOT / 'engine/doom.wasm').resolve():
+        parser.error('diagnostic builds require --output outside the shipping engine')
     sdk = Path(os.environ.get('WASI_SDK_PATH', ROOT / 'build/wasi-sdk-34.0-arm64-macos'))
     cc = sdk / 'bin/clang'
     if not cc.is_file():
@@ -55,6 +65,12 @@ def build(args, sdk, cc, out):
     flags = ['-O2', '-D_DEFAULT_SOURCE', '-D_POSIX_C_SOURCE=200809L',
              '-DDOOMGENERIC_RESX=320', '-DDOOMGENERIC_RESY=200', '-I'+str(SRC),
              '-Wno-pointer-sign', '-Wno-format', '-Wno-unused-command-line-argument']
+    if not args.no_replay_cache:
+        flags += ['-DREPLAY_CACHE', '-DREPLAY_DELTA_BYTES='+str(args.replay_delta_bytes)]
+    if args.render_mode == 'defer':
+        flags += ['-DDEFER_RASTER']
+    elif args.render_mode == 'none':
+        flags += ['-DPROFILE_NO_RENDER']
     link = []
     if args.lto:
         flags += ['-flto']
@@ -68,7 +84,10 @@ def build(args, sdk, cc, out):
 
     def compile_one(source):
         obj = out / (source.stem + '.o')
-        subprocess.run([*compiler, *flags, '-c', str(source), '-o', str(obj)], check=True, env=env)
+        warnings = []
+        if source.parent == ROOT / 'engine/native':
+            warnings = ['-Wall', '-Wextra', '-Werror', '-Wformat=2']
+        subprocess.run([*compiler, *flags, *warnings, '-c', str(source), '-o', str(obj)], check=True, env=env)
         return str(obj)
 
     with ThreadPoolExecutor(max_workers=args.jobs) as pool:

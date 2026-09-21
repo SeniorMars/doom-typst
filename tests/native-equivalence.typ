@@ -5,9 +5,10 @@
 #{
   let reference = plugin(sys.inputs.at("reference"))
   let candidate = plugin(sys.inputs.at("candidate", default: "../engine/doom.wasm"))
+  let tics = int(sys.inputs.at("tics", default: "1"))
   let wad = read("../assets/doom1.wad", encoding: none)
-  let new-game(map: 1) = plugin.transition(candidate.init, wad, bytes((1, 1, map, 1)))
-  let old-game(map: 1) = plugin.transition(reference.init, wad, bytes((1, 1, map, 1)))
+  let new-game(map: 1) = plugin.transition(candidate.init, wad, bytes((1, 1, map, tics)))
+  let old-game(map: 1) = plugin.transition(reference.init, wad, bytes((1, 1, map, tics)))
   let check(old, new) = {
     assert.eq(info(new), info(old), message: "Game state differs from reference")
     assert.eq(framebuffer(new), framebuffer(old), message: "Pixels differ from reference")
@@ -34,6 +35,6 @@
     new = advance(new, actions)
     check(old, new)
   }
-  assert.eq(info(new).map, 2)
+  if tics == 1 { assert.eq(info(new).map, 2) }
   [Reference engine state and framebuffer comparisons passed.]
 }

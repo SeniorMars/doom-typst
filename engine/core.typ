@@ -2,12 +2,19 @@
 #let engine = plugin("doom.wasm")
 #import "controls.typ": default-actions, bindings, parse-actions, key-hint
 
-#let new-game(wad, skill: 3, episode: 1, map: 1, tics: 4) = {
+#let initialize(wad, skill: 3, episode: 1, map: 1, tics: 4, cached: false, save: none) = {
   assert(type(skill) == int and skill >= 1 and skill <= 5, message: "Skill must be 1–5")
   assert(type(episode) == int and episode >= 1 and episode <= 4, message: "Episode must be 1–4")
   assert(type(map) == int and map >= 1 and map <= 32, message: "Map must be 1–32")
   assert(type(tics) == int and tics >= 1 and tics <= 35, message: "Tics per command must be 1–35")
-  plugin.transition(engine.init, wad, bytes((skill, episode, map, tics)))
+  let config = bytes((skill, episode, map, tics))
+  if cached {
+    plugin.transition(engine.cached_init, wad, config, if save == none { bytes(()) } else { save })
+  } else { plugin.transition(engine.init, wad, config) }
+}
+
+#let new-game(wad, skill: 3, episode: 1, map: 1, tics: 4) = {
+  initialize(wad, skill: skill, episode: episode, map: map, tics: tics)
 }
 
 #let advance(game, actions) = plugin.transition(game.advance, bytes(actions))
@@ -23,19 +30,35 @@
 }
 #let load-game(game, data) = plugin.transition(game.load, data)
 
-#let play(input, wad: none, actions: (:), skill: 3, episode: 1, map: 1, tics: 4, save: none, chunk-size: 16) = {
-  assert(type(chunk-size) == int and chunk-size >= 1 and chunk-size <= 4096, message: "Chunk size must be 1–4096")
+// The cached and transition APIs use separate initialized modules. A loaded
+// save becomes the replay baseline; restart always returns to a fresh level.
+#let prepare(input, wad, actions, skill, episode, map, tics, save, cached) = {
   assert(type(wad) == bytes, message: "Pass WAD bytes with wad: read(\"doom1.wad\", encoding: none)")
   let commands = parse-actions(input, actions: actions)
-  let game = new-game(wad, skill: skill, episode: episode, map: map, tics: tics)
-  if save != none and not commands.contains("r") { game = load-game(game, save) }
-  // Restart discards the preceding history. Whitespace and comments cost no tics.
-  let commands = commands.split("r").last()
-  // Stable prefixes are cached; short blocks bound replay work per keystroke.
+  let save = if commands.contains("r") { none } else { save }
+  let game = initialize(wad, skill: skill, episode: episode, map: map, tics: tics, cached: cached, save: save)
+  if save != none and not cached { game = load-game(game, save) }
+  (game: game, commands: commands.split("r").last())
+}
+
+#let play(input, wad: none, actions: (:), skill: 3, episode: 1, map: 1, tics: 4, save: none, chunk-size: 16) = {
+  assert(type(chunk-size) == int and chunk-size >= 1 and chunk-size <= 4096, message: "Chunk size must be 1–4096")
+  let prepared = prepare(input, wad, actions, skill, episode, map, tics, save, false)
+  let (game, commands) = (prepared.game, prepared.commands)
   for start in range(0, commands.len(), step: chunk-size) {
     game = advance(game, commands.slice(start, calc.min(start + chunk-size, commands.len())))
   }
   game
+}
+
+// Returns values, not a mutable game handle. Metadata and pixels are produced
+// by one plugin call, so neither can accidentally describe another history.
+#let view(input, wad: none, actions: (:), skill: 3, episode: 1, map: 1, tics: 4, save: none) = {
+  let prepared = prepare(input, wad, actions, skill, episode, map, tics, save, true)
+  assert(prepared.commands.len() <= 65536, message: "Cached play accepts at most 65536 commands; export a save to continue")
+  let result = prepared.game.cached_view(bytes(prepared.commands))
+  let size = result.at(0) + result.at(1)*256 + result.at(2)*65536 + result.at(3)*16777216
+  (state: json(result.slice(4, 4 + size)), frame: result.slice(4 + size))
 }
 
 // A freshly initialized template compiles even before game data is supplied.
@@ -56,7 +79,7 @@
   Each typed command advances the game. Delete commands to rewind.]
 })
 
-#let doom(body, wad: none, actions: (:), skill: 3, episode: 1, map: 1, tics: 4, help: true, save: none, chunk-size: 16) = {
+#let doom(body, wad: none, actions: (:), skill: 3, episode: 1, map: 1, tics: 4, help: true, save: none, chunk-size: 16, cache: true) = {
   set page(width: 640pt, height: if help or wad == none { auto } else { 480pt }, margin: 0pt, fill: black)
   let keys = bindings(actions)
   if wad == none { setup-screen() } else {
@@ -64,15 +87,26 @@
     let archive = if type(wad) == bytes { wad } else { read(wad, encoding: none) }
     // The document loads saves so its file paths stay relative to the project,
     // even when this function lives in an installed package.
-    let game = play(input, actions: keys, wad: archive, skill: skill, episode: episode, map: map, tics: tics, save: save, chunk-size: chunk-size)
-    let state = info(game)
-    [#metadata(state) <doom-engine>]
-    if state.state == 0 and sys.inputs.at("export-save", default: "false") == "true" {
-      let data = saved-bytes(save-game(game))
+    let export-save = sys.inputs.at("export-save", default: "false") == "true"
+    let rendered = if cache and not export-save {
+      view(input, actions: keys, wad: archive, skill: skill, episode: episode, map: map, tics: tics, save: save)
+    } else {
+      // Save export is an occasional full replay, not an interactive prefix cache.
+      let step = if cache and export-save { 4096 } else { chunk-size }
+      let game = play(input, actions: keys, wad: archive, skill: skill, episode: episode, map: map, tics: tics, save: save, chunk-size: step)
+      let state = info(game)
+      (state: state, frame: framebuffer(game), save: if export-save and state.state == 0 {
+        saved-bytes(save-game(game))
+      })
+    }
+    if export-save and rendered.save != none {
+      let data = rendered.save
       [#metadata(range(data.len()).map(i => data.at(i))) <doom-save>]
     }
+    let state = rendered.state
+    [#metadata(state) <doom-engine>]
     // DOOM's 320x200 framebuffer was displayed at 4:3 on a CRT: retain that aspect.
-    image(framebuffer(game), format: (encoding: "rgb8", width: 320, height: 200),
+    image(rendered.frame, format: (encoding: "rgb8", width: 320, height: 200),
       width: 640pt, height: 480pt, fit: "stretch", scaling: "pixelated", alt: "DOOM gameplay, rendered during Typst compilation")
     if help {
       set text(font: "DejaVu Sans Mono", size: 9pt, fill: rgb("acb2a0"))
